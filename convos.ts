@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { buildIndex, findById } from "./cache.ts";
 import { sourceByName } from "./sources/index.ts";
@@ -93,34 +92,19 @@ function preview(id: string): void {
   );
   console.log(C.dim("─".repeat(50)));
 
-  // Stream the transcript turns (lightweight: just role + first lines of text).
-  let raw = "";
-  try {
-    raw = readFileSync(s.file, "utf8");
-  } catch {
+  // Each source knows how to read its own transcript format.
+  const src = sourceByName(s.tool);
+  const raw = src?.transcript?.(s) ?? [];
+  const turns = raw
+    .filter((t) => t.text)
+    .map((t) => {
+      const tag = t.role === "user" ? C.cyan("▸ you") : C.yellow("◂ ai ");
+      return `${tag}  ${t.text.slice(0, 280)}`;
+    });
+  // Fall back to the first prompt when a source has no transcript reader.
+  if (turns.length === 0 && s.firstPrompt) {
+    console.log(`${C.cyan("▸ you")}  ${s.firstPrompt}`);
     return;
-  }
-  const turns: string[] = [];
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    let o: any;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (o.type !== "user" && o.type !== "assistant") continue;
-    const content = o.message?.content;
-    let text = "";
-    if (typeof content === "string") text = content;
-    else if (Array.isArray(content))
-      text = content
-        .map((b: any) => (typeof b === "string" ? b : b?.type === "text" ? b.text : ""))
-        .join(" ");
-    text = text.replace(/\s+/g, " ").trim();
-    if (!text || text.startsWith("<")) continue;
-    const tag = o.type === "user" ? C.cyan("▸ you") : C.yellow("◂ ai ");
-    turns.push(`${tag}  ${text.slice(0, 280)}`);
   }
   // Show the opening exchange and the most recent turns.
   const head = turns.slice(0, 4);
@@ -225,8 +209,8 @@ PICKER KEYS
   ctrl-y         copy the resume command to the clipboard (don't launch)
   ctrl-/         toggle the transcript preview
 
-Indexes: ~/.claude/projects (Claude Code). Codex / OpenCode / Gemini / Cursor
-sources are pluggable in convos/sources/.`;
+Indexes: Claude Code, OpenCode, and oh-my-pi (omp). More tools are pluggable
+in convos/sources/.`;
 
 // ── main ───────────────────────────────────────────────────────────────────--
 const { cmd, positional, flags } = parseArgs(process.argv.slice(2));

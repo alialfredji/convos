@@ -3,14 +3,26 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Session, Source, ResumePlan, Turn } from "./types.ts";
 
-const PROJECTS = join(homedir(), ".claude", "projects");
+// omp stores sessions under <agentDir>/sessions. The agent dir moved from
+// ~/.pi to ~/.omp (the current location); ~/.pi is kept as a legacy fallback so
+// older sessions still appear. Newer roots win on dedup (by session uuid).
+const ROOTS = [
+  join(homedir(), ".omp", "agent", "sessions"),
+  join(homedir(), ".pi", "agent", "sessions"),
+];
 
-// Pull plain text out of a Claude message `content`, which may be a string
-// or an array of blocks. Returns "" for non-text (e.g. tool_result) content.
+// Session files are named "<iso-timestamp>_<uuid>.jsonl"; the uuid is the id.
+function sessionUuid(filename: string): string {
+  return filename.replace(/\.jsonl$/, "").split("_").pop() ?? filename;
+}
+
+// Pull plain text out of an omp message `content`, which is an array of blocks
+// (text / thinking / toolCall). Returns "" for non-text (e.g. tool_result)
+// content. Mirrors claude.ts so titles/prompts read the same way.
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    // A user turn that is really a tool result, not something the human typed.
+    // A turn that is really a tool result, not something the human typed.
     if (content.some((b) => b && typeof b === "object" && (b as any).type === "tool_result")) {
       return "";
     }
@@ -34,28 +46,36 @@ function clean(text: string): string {
   return text.replace(/^[❯>]\s*/, "").replace(/\s+/g, " ").trim();
 }
 
-export const claude: Source = {
-  name: "claude",
+export const omp: Source = {
+  name: "omp",
 
   available() {
-    return existsSync(PROJECTS);
+    return ROOTS.some((r) => existsSync(r));
   },
 
   files() {
-    if (!existsSync(PROJECTS)) return [];
     const out: string[] = [];
-    for (const proj of readdirSync(PROJECTS)) {
-      const dir = join(PROJECTS, proj);
-      let entries: string[];
-      try {
-        entries = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      // Only top-level transcripts. Nested `<id>/subagents/agent-*.jsonl` are
-      // subagent sidechains of a parent session, not resumable conversations.
-      for (const f of entries) {
-        if (f.endsWith(".jsonl")) out.push(join(dir, f));
+    const seen = new Set<string>(); // dedup the same session across roots
+    // Layout: <root>/<encoded-cwd-dir>/<iso>_<uuid>.jsonl. One file per session.
+    // Nested <iso>_<uuid>/*.jsonl are subagent sidechains and are skipped (we
+    // only read the top-level .jsonl entries in each cwd dir).
+    for (const root of ROOTS) {
+      if (!existsSync(root)) continue;
+      for (const sub of readdirSync(root)) {
+        const dir = join(root, sub);
+        let entries: string[];
+        try {
+          entries = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const f of entries) {
+          if (!f.endsWith(".jsonl")) continue;
+          const uuid = sessionUuid(f);
+          if (seen.has(uuid)) continue;
+          seen.add(uuid);
+          out.push(join(dir, f));
+        }
       }
     }
     return out;
@@ -86,9 +106,14 @@ export const claude: Source = {
         continue;
       }
 
-      if (!id && o.sessionId) id = o.sessionId;
-      if (!cwd && o.cwd) cwd = o.cwd;
-      if (o.type === "ai-title" && o.aiTitle) title = o.aiTitle;
+      // Line 0 is the session header: { type:"session", id, timestamp, cwd,
+      // title? }. Newer sessions carry an auto title; older ones don't, so we
+      // fall back to the first real prompt below.
+      if (o.type === "session") {
+        if (o.id) id = o.id;
+        if (o.cwd) cwd = o.cwd;
+        if (typeof o.title === "string" && o.title.trim()) title = o.title.trim();
+      }
 
       if (o.timestamp) {
         const t = Date.parse(o.timestamp);
@@ -98,17 +123,23 @@ export const claude: Source = {
         }
       }
 
-      if (o.type === "user" || o.type === "assistant") {
+      // Conversation turns. Roles seen: user / assistant / toolResult /
+      // bashExecution — only the first two are real human/model turns.
+      if (o.type === "message" && (o.message?.role === "user" || o.message?.role === "assistant")) {
         const text = textOf(o.message?.content);
-        if (o.type === "user" && !firstPrompt && text && !isMeta(text)) {
+        if (o.message.role === "user" && !firstPrompt && text && !isMeta(text)) {
           firstPrompt = clean(text).slice(0, 240);
         }
         if (text) msgCount++;
       }
     }
 
-    // Session id falls back to the filename (which IS the uuid).
-    if (!id) id = file.split("/").pop()!.replace(/\.jsonl$/, "");
+    // Session id falls back to the filename's uuid (the part after the `_`).
+    if (!id) {
+      const base = file.split("/").pop()!.replace(/\.jsonl$/, "");
+      const us = base.indexOf("_");
+      id = us >= 0 ? base.slice(us + 1) : base;
+    }
 
     const st = statSync(file);
     const end = max || st.mtimeMs;
@@ -117,7 +148,7 @@ export const claude: Source = {
     if (!title) title = firstPrompt ? firstPrompt.slice(0, 70) : "(untitled session)";
 
     return {
-      tool: "claude",
+      tool: "omp",
       id,
       dir: cwd || "(unknown)",
       title,
@@ -131,8 +162,8 @@ export const claude: Source = {
 
   resume(s: Session): ResumePlan {
     return {
-      argv: ["claude", "--resume", s.id],
-      shell: `cd ${shq(s.dir)} && claude --resume ${s.id}`,
+      argv: ["omp", "--resume", s.id],
+      shell: `cd ${shq(s.dir)} && omp --resume ${s.id}`,
     };
   },
 
@@ -152,10 +183,11 @@ export const claude: Source = {
       } catch {
         continue;
       }
-      if (o.type !== "user" && o.type !== "assistant") continue;
+      const role = o.message?.role;
+      if (o.type !== "message" || (role !== "user" && role !== "assistant")) continue;
       const text = clean(textOf(o.message?.content));
       if (!text || text.startsWith("<")) continue;
-      turns.push({ role: o.type, text });
+      turns.push({ role, text });
     }
     return turns;
   },

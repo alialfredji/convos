@@ -38,26 +38,53 @@ convos --help          full help
 | `ctrl-y` | copy the resume command to the clipboard (don't launch)      |
 | `ctrl-/` | toggle the transcript preview                                |
 
+## Supported tools
+
+| tool                  | resumes with            |
+|-----------------------|-------------------------|
+| **Claude Code**       | `claude --resume <id>`  |
+| **OpenCode**          | `opencode --session <id>` |
+| **oh-my-pi** (`omp`)  | `omp --resume <id>`     |
+
+More tools (Codex, Gemini, Cursor, …) are designed to drop in — see *Adding a tool*.
+
 ## How it works
 
 - **Sources** (`sources/`) each implement a small interface (`available` /
-  `files` / `parse` / `resume`). Claude Code ships today; Codex, OpenCode,
-  Gemini, and Cursor are designed to drop in as additional sources.
-- **Index cache** (`~/.cache/convos/index.json`) is keyed on each transcript's
+  `files` / `parse` / `resume` / optional `transcript`). Each tool's storage
+  format is read by its own source file.
+- **Index cache** (`~/.cache/convos/index.json`) is keyed on each session's
   mtime + size, so only changed sessions are re-parsed — the picker stays fast
   even with hundreds of conversations.
-- **Resume** for Claude Code runs `claude --resume <id>` in the session's
-  original working directory.
+- **Resume** runs the tool's own resume command in the session's original
+  working directory.
 
 ## Get started
 
-You need two tools first (one-time):
+```sh
+brew install alialfredji/tap/convos
+```
+
+Homebrew pulls in `fzf` and compiles `convos` into a single self-contained
+binary (the Bun build toolchain is needed only at build time). Then run:
+
+```sh
+convos
+```
+
+Resuming a session uses that tool's own CLI — e.g. Claude Code sessions resume
+with your existing `claude` command.
+
+<details>
+<summary><b>From source</b> (for hacking on convos)</summary>
+
+You need [Bun](https://bun.sh) and [fzf](https://github.com/junegunn/fzf):
 
 ```sh
 brew install oven-sh/bun/bun fzf
 ```
 
-Then install `convos`:
+Then clone and link it into your PATH:
 
 ```sh
 git clone https://github.com/alialfredji/convos.git
@@ -65,14 +92,10 @@ cd convos
 ./install.sh
 ```
 
-That's it. Open a new terminal and run:
-
-```sh
-convos
-```
-
 > If it says `command not found`, add `~/.local/bin` to your PATH (the installer
 > prints the exact line to copy), then restart your terminal.
+
+</details>
 
 ## Adding a tool
 

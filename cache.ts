@@ -32,11 +32,21 @@ function save(cache: Cache): void {
 export function buildIndex(): Session[] {
   const cache = load();
   const next: Cache = {};
+  const bulk: Session[] = []; // sessions from scan()-based sources (not cached)
   let reparsed = 0;
 
   for (const source of SOURCES) {
     if (!source.available()) continue;
-    for (const file of source.files()) {
+
+    // BULK/DB-BASED source: one query returns everything, re-run each time so
+    // it's always fresh (a stale cache is exactly the bug this avoids).
+    if (source.scan) {
+      bulk.push(...source.scan());
+      continue;
+    }
+
+    // FILE-BASED source: cache by mtime/size, only re-parse changed files.
+    for (const file of source.files!()) {
       let st;
       try {
         st = statSync(file);
@@ -48,7 +58,7 @@ export function buildIndex(): Session[] {
         next[file] = prev; // unchanged → reuse
         continue;
       }
-      const session = source.parse(file);
+      const session = source.parse!(file);
       if (!session) continue;
       next[file] = { mtimeMs: st.mtimeMs, size: st.size, session };
       reparsed++;
@@ -56,22 +66,19 @@ export function buildIndex(): Session[] {
   }
 
   save(next);
+  const sessions = [...Object.values(next).map((e) => e.session), ...bulk];
   if (process.env.CONVOS_DEBUG) {
-    console.error(`[convos] indexed ${Object.keys(next).length} sessions (${reparsed} reparsed)`);
+    console.error(`[convos] indexed ${sessions.length} sessions (${reparsed} reparsed, ${bulk.length} bulk)`);
   }
 
-  return Object.values(next)
-    .map((e) => e.session)
-    .sort((a, b) => b.end - a.end); // most recent first
+  return sessions.sort((a, b) => b.end - a.end); // most recent first
 }
 
-// Fast lookup of a single session by id (used by the fzf preview hook).
+// Lookup of a single session by id (used by the fzf preview hook). Rebuilds the
+// index (cheap: file cache is reused, bulk sources are a single query) so it
+// covers every source, not just the file-cached ones.
 export function findById(id: string): Session | undefined {
-  const cache = load();
-  for (const e of Object.values(cache)) {
-    if (e.session.id === id) return e.session;
-  }
-  return undefined;
+  return buildIndex().find((s) => s.id === id);
 }
 
 export const CACHE_PATH = CACHE_FILE;
