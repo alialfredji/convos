@@ -11,6 +11,12 @@ export interface Session {
   file: string; // path to the transcript on disk
 }
 
+// One conversation turn, used to render the picker preview.
+export interface Turn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 // How to re-enter a session for a given tool.
 export interface ResumePlan {
   // Command + args to exec (stdio inherited) to relaunch interactively.
@@ -30,4 +36,7 @@ export interface Source {
   parse(file: string): Session | null;
   // Build the resume plan for one of this source's sessions.
   resume(s: Session): ResumePlan;
+  // Read the conversation turns for the picker preview (optional; the preview
+  // falls back to the session's firstPrompt when a source doesn't implement it).
+  transcript?(s: Session): Turn[];
 }

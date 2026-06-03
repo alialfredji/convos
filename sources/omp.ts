@@ -3,14 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Session, Source, ResumePlan, Turn } from "./types.ts";
 
-const PROJECTS = join(homedir(), ".claude", "projects");
+const SESSIONS = join(homedir(), ".pi", "agent", "sessions");
 
-// Pull plain text out of a Claude message `content`, which may be a string
-// or an array of blocks. Returns "" for non-text (e.g. tool_result) content.
+// Pull plain text out of an omp message `content`, which is an array of blocks
+// (text / thinking / toolCall). Returns "" for non-text (e.g. tool_result)
+// content. Mirrors claude.ts so titles/prompts read the same way.
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    // A user turn that is really a tool result, not something the human typed.
+    // A turn that is really a tool result, not something the human typed.
     if (content.some((b) => b && typeof b === "object" && (b as any).type === "tool_result")) {
       return "";
     }
@@ -34,26 +35,26 @@ function clean(text: string): string {
   return text.replace(/^[❯>]\s*/, "").replace(/\s+/g, " ").trim();
 }
 
-export const claude: Source = {
-  name: "claude",
+export const omp: Source = {
+  name: "omp",
 
   available() {
-    return existsSync(PROJECTS);
+    return existsSync(SESSIONS);
   },
 
   files() {
-    if (!existsSync(PROJECTS)) return [];
+    if (!existsSync(SESSIONS)) return [];
     const out: string[] = [];
-    for (const proj of readdirSync(PROJECTS)) {
-      const dir = join(PROJECTS, proj);
+    // Layout: <sessions>/<encoded-cwd-dir>/<iso>_<uuid>.jsonl. One file per
+    // session. Walk every subdir; some may be empty — skip gracefully.
+    for (const sub of readdirSync(SESSIONS)) {
+      const dir = join(SESSIONS, sub);
       let entries: string[];
       try {
         entries = readdirSync(dir);
       } catch {
         continue;
       }
-      // Only top-level transcripts. Nested `<id>/subagents/agent-*.jsonl` are
-      // subagent sidechains of a parent session, not resumable conversations.
       for (const f of entries) {
         if (f.endsWith(".jsonl")) out.push(join(dir, f));
       }
@@ -86,9 +87,12 @@ export const claude: Source = {
         continue;
       }
 
-      if (!id && o.sessionId) id = o.sessionId;
-      if (!cwd && o.cwd) cwd = o.cwd;
-      if (o.type === "ai-title" && o.aiTitle) title = o.aiTitle;
+      // Line 0 is the session header: { type:"session", id, timestamp, cwd }.
+      // omp has no title field, so we derive it from the first real prompt.
+      if (o.type === "session") {
+        if (o.id) id = o.id;
+        if (o.cwd) cwd = o.cwd;
+      }
 
       if (o.timestamp) {
         const t = Date.parse(o.timestamp);
@@ -98,17 +102,23 @@ export const claude: Source = {
         }
       }
 
-      if (o.type === "user" || o.type === "assistant") {
+      // Conversation turns. Roles seen: user / assistant / toolResult /
+      // bashExecution — only the first two are real human/model turns.
+      if (o.type === "message" && (o.message?.role === "user" || o.message?.role === "assistant")) {
         const text = textOf(o.message?.content);
-        if (o.type === "user" && !firstPrompt && text && !isMeta(text)) {
+        if (o.message.role === "user" && !firstPrompt && text && !isMeta(text)) {
           firstPrompt = clean(text).slice(0, 240);
         }
         if (text) msgCount++;
       }
     }
 
-    // Session id falls back to the filename (which IS the uuid).
-    if (!id) id = file.split("/").pop()!.replace(/\.jsonl$/, "");
+    // Session id falls back to the filename's uuid (the part after the `_`).
+    if (!id) {
+      const base = file.split("/").pop()!.replace(/\.jsonl$/, "");
+      const us = base.indexOf("_");
+      id = us >= 0 ? base.slice(us + 1) : base;
+    }
 
     const st = statSync(file);
     const end = max || st.mtimeMs;
@@ -117,7 +127,7 @@ export const claude: Source = {
     if (!title) title = firstPrompt ? firstPrompt.slice(0, 70) : "(untitled session)";
 
     return {
-      tool: "claude",
+      tool: "omp",
       id,
       dir: cwd || "(unknown)",
       title,
@@ -131,8 +141,8 @@ export const claude: Source = {
 
   resume(s: Session): ResumePlan {
     return {
-      argv: ["claude", "--resume", s.id],
-      shell: `cd ${shq(s.dir)} && claude --resume ${s.id}`,
+      argv: ["omp", "--resume", s.id],
+      shell: `cd ${shq(s.dir)} && omp --resume ${s.id}`,
     };
   },
 
@@ -152,10 +162,11 @@ export const claude: Source = {
       } catch {
         continue;
       }
-      if (o.type !== "user" && o.type !== "assistant") continue;
+      const role = o.message?.role;
+      if (o.type !== "message" || (role !== "user" && role !== "assistant")) continue;
       const text = clean(textOf(o.message?.content));
       if (!text || text.startsWith("<")) continue;
-      turns.push({ role: o.type, text });
+      turns.push({ role, text });
     }
     return turns;
   },
