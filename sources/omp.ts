@@ -3,7 +3,18 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Session, Source, ResumePlan, Turn } from "./types.ts";
 
-const SESSIONS = join(homedir(), ".pi", "agent", "sessions");
+// omp stores sessions under <agentDir>/sessions. The agent dir moved from
+// ~/.pi to ~/.omp (the current location); ~/.pi is kept as a legacy fallback so
+// older sessions still appear. Newer roots win on dedup (by session uuid).
+const ROOTS = [
+  join(homedir(), ".omp", "agent", "sessions"),
+  join(homedir(), ".pi", "agent", "sessions"),
+];
+
+// Session files are named "<iso-timestamp>_<uuid>.jsonl"; the uuid is the id.
+function sessionUuid(filename: string): string {
+  return filename.replace(/\.jsonl$/, "").split("_").pop() ?? filename;
+}
 
 // Pull plain text out of an omp message `content`, which is an array of blocks
 // (text / thinking / toolCall). Returns "" for non-text (e.g. tool_result)
@@ -39,24 +50,32 @@ export const omp: Source = {
   name: "omp",
 
   available() {
-    return existsSync(SESSIONS);
+    return ROOTS.some((r) => existsSync(r));
   },
 
   files() {
-    if (!existsSync(SESSIONS)) return [];
     const out: string[] = [];
-    // Layout: <sessions>/<encoded-cwd-dir>/<iso>_<uuid>.jsonl. One file per
-    // session. Walk every subdir; some may be empty — skip gracefully.
-    for (const sub of readdirSync(SESSIONS)) {
-      const dir = join(SESSIONS, sub);
-      let entries: string[];
-      try {
-        entries = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const f of entries) {
-        if (f.endsWith(".jsonl")) out.push(join(dir, f));
+    const seen = new Set<string>(); // dedup the same session across roots
+    // Layout: <root>/<encoded-cwd-dir>/<iso>_<uuid>.jsonl. One file per session.
+    // Nested <iso>_<uuid>/*.jsonl are subagent sidechains and are skipped (we
+    // only read the top-level .jsonl entries in each cwd dir).
+    for (const root of ROOTS) {
+      if (!existsSync(root)) continue;
+      for (const sub of readdirSync(root)) {
+        const dir = join(root, sub);
+        let entries: string[];
+        try {
+          entries = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const f of entries) {
+          if (!f.endsWith(".jsonl")) continue;
+          const uuid = sessionUuid(f);
+          if (seen.has(uuid)) continue;
+          seen.add(uuid);
+          out.push(join(dir, f));
+        }
       }
     }
     return out;
@@ -87,11 +106,13 @@ export const omp: Source = {
         continue;
       }
 
-      // Line 0 is the session header: { type:"session", id, timestamp, cwd }.
-      // omp has no title field, so we derive it from the first real prompt.
+      // Line 0 is the session header: { type:"session", id, timestamp, cwd,
+      // title? }. Newer sessions carry an auto title; older ones don't, so we
+      // fall back to the first real prompt below.
       if (o.type === "session") {
         if (o.id) id = o.id;
         if (o.cwd) cwd = o.cwd;
+        if (typeof o.title === "string" && o.title.trim()) title = o.title.trim();
       }
 
       if (o.timestamp) {
