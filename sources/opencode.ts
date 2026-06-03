@@ -1,117 +1,73 @@
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Session, Source, ResumePlan, Turn } from "./types.ts";
 
-const STORAGE = join(homedir(), ".local", "share", "opencode", "storage");
-const SESSION = join(STORAGE, "session");
-const MESSAGE = join(STORAGE, "message");
-const PART = join(STORAGE, "part");
+// OpenCode migrated from per-session JSON files (storage/session/*.json) to a
+// single SQLite database. The DB is the authoritative, current store — the old
+// JSON files are stale, so we read only the DB here.
+const DB_PATH = join(homedir(), ".local", "share", "opencode", "opencode.db");
+
+function open(): Database {
+  return new Database(DB_PATH, { readonly: true });
+}
 
 function clean(text: string): string {
   return text.replace(/^[❯>]\s*/, "").replace(/\s+/g, " ").trim();
-}
-
-// Best-effort: pull the first user message's text for a session. Message and
-// part files are id-prefixed in time order, so the lexically-first message file
-// is the earliest turn (a user prompt). Its text lives in part/<msgID>/prt_*.json
-// as a block with `type: "text"`. Returns "" if anything is missing — the title
-// is the primary display, so this is never allowed to fail the parse.
-function firstPromptOf(id: string): string {
-  const msgDir = join(MESSAGE, id);
-  let msgs: string[];
-  try {
-    msgs = readdirSync(msgDir).filter((f) => f.endsWith(".json")).sort();
-  } catch {
-    return "";
-  }
-  for (const msg of msgs) {
-    const msgId = msg.replace(/\.json$/, "");
-    let parts: string[];
-    try {
-      parts = readdirSync(join(PART, msgId)).filter((f) => f.endsWith(".json")).sort();
-    } catch {
-      continue;
-    }
-    for (const p of parts) {
-      try {
-        const o = JSON.parse(readFileSync(join(PART, msgId, p), "utf8"));
-        if (o?.type === "text" && typeof o.text === "string" && o.text.trim()) {
-          return clean(o.text).slice(0, 240);
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-  return "";
-}
-
-// Count message files for a session; the message/<id>/ dir holds one per turn.
-function msgCountOf(id: string): number {
-  try {
-    return readdirSync(join(MESSAGE, id)).filter((f) => f.endsWith(".json")).length;
-  } catch {
-    return 0;
-  }
 }
 
 export const opencode: Source = {
   name: "opencode",
 
   available() {
-    return existsSync(SESSION);
+    return existsSync(DB_PATH);
   },
 
-  files() {
-    if (!existsSync(SESSION)) return [];
-    const out: string[] = [];
-    // Each subdirectory of session/ is one project (plus a literal "global"
-    // dir); every ses_*.json inside is one session.
-    for (const proj of readdirSync(SESSION)) {
-      const dir = join(SESSION, proj);
-      let entries: string[];
-      try {
-        entries = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const f of entries) {
-        if (f.startsWith("ses_") && f.endsWith(".json")) out.push(join(dir, f));
-      }
-    }
-    return out;
-  },
-
-  parse(file: string): Session | null {
-    let o: any;
+  scan(): Session[] {
+    let db: Database;
     try {
-      o = JSON.parse(readFileSync(file, "utf8"));
+      db = open();
     } catch {
-      return null;
+      return [];
     }
+    try {
+      // parent_id IS NULL → top-level conversations only (children are subagent
+      // sessions, excluded like subagent sidechains in the other sources).
+      const rows = db
+        .query(
+          "SELECT id, directory, title, time_created, time_updated FROM session WHERE parent_id IS NULL"
+        )
+        .all() as Array<{
+        id: string;
+        directory: string;
+        title: string;
+        time_created: number;
+        time_updated: number;
+      }>;
 
-    const id: string = o.id || file.split("/").pop()!.replace(/\.json$/, "");
-    const firstPrompt = firstPromptOf(id);
+      // One grouped query for message counts, rather than 500+ subqueries.
+      const counts = new Map<string, number>();
+      for (const r of db
+        .query("SELECT session_id, count(*) c FROM message GROUP BY session_id")
+        .all() as Array<{ session_id: string; c: number }>) {
+        counts.set(r.session_id, r.c);
+      }
 
-    const st = statSync(file);
-    const start = typeof o.time?.created === "number" ? o.time.created : st.mtimeMs;
-    const end = typeof o.time?.updated === "number" ? o.time.updated : st.mtimeMs;
-
-    let title: string = typeof o.title === "string" ? o.title.trim() : "";
-    if (!title) title = firstPrompt ? firstPrompt.slice(0, 70) : "(untitled session)";
-
-    return {
-      tool: "opencode",
-      id,
-      dir: o.directory || "(unknown)",
-      title,
-      firstPrompt,
-      start,
-      end,
-      msgCount: msgCountOf(id),
-      file,
-    };
+      return rows.map((r) => ({
+        tool: "opencode",
+        id: r.id,
+        dir: r.directory || "(unknown)",
+        title: (r.title || "").trim() || "(untitled session)",
+        firstPrompt: "", // title is always present; preview reads transcript()
+        start: r.time_created,
+        end: r.time_updated,
+        msgCount: counts.get(r.id) ?? 0,
+        file: DB_PATH,
+      }));
+    } finally {
+      db.close();
+    }
   },
 
   resume(s: Session): ResumePlan {
@@ -124,44 +80,50 @@ export const opencode: Source = {
   },
 
   transcript(s: Session): Turn[] {
-    // Turns live in message/<id>/<msgID>.json (role) with text in the
-    // part/<msgID>/prt_*.json blocks. Both are id-prefixed in time order.
-    let msgs: string[];
+    let db: Database;
     try {
-      msgs = readdirSync(join(MESSAGE, s.id)).filter((f) => f.endsWith(".json")).sort();
+      db = open();
     } catch {
       return [];
     }
-    const turns: Turn[] = [];
-    for (const msg of msgs) {
-      let role: any;
-      try {
-        role = JSON.parse(readFileSync(join(MESSAGE, s.id, msg), "utf8")).role;
-      } catch {
-        continue;
+    try {
+      const msgs = db
+        .query("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created")
+        .all(s.id) as Array<{ id: string; data: string }>;
+      const partStmt = db.query(
+        "SELECT data FROM part WHERE message_id = ? ORDER BY time_created"
+      );
+
+      const turns: Turn[] = [];
+      for (const m of msgs) {
+        let role: any;
+        try {
+          role = JSON.parse(m.data).role;
+        } catch {
+          continue;
+        }
+        if (role !== "user" && role !== "assistant") continue;
+
+        const parts = partStmt.all(m.id) as Array<{ data: string }>;
+        const text = parts
+          .map((p) => {
+            try {
+              const o = JSON.parse(p.data);
+              if (o?.type !== "text" || typeof o.text !== "string") return "";
+              // Skip harness-injected wrappers (system reminders, etc.).
+              return o.text.trimStart().startsWith("<") ? "" : o.text;
+            } catch {
+              return "";
+            }
+          })
+          .join(" ");
+        const cleaned = clean(text);
+        if (cleaned) turns.push({ role, text: cleaned });
       }
-      if (role !== "user" && role !== "assistant") continue;
-      const msgId = msg.replace(/\.json$/, "");
-      let parts: string[];
-      try {
-        parts = readdirSync(join(PART, msgId)).filter((f) => f.endsWith(".json")).sort();
-      } catch {
-        continue;
-      }
-      const text = parts
-        .map((p) => {
-          try {
-            const o = JSON.parse(readFileSync(join(PART, msgId, p), "utf8"));
-            return o?.type === "text" && typeof o.text === "string" ? o.text : "";
-          } catch {
-            return "";
-          }
-        })
-        .join(" ");
-      const cleaned = clean(text);
-      if (cleaned) turns.push({ role, text: cleaned });
+      return turns;
+    } finally {
+      db.close();
     }
-    return turns;
   },
 };
 
