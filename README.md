@@ -42,9 +42,15 @@ convos --help          full help
 
 | tool                  | resumes with            |
 |-----------------------|-------------------------|
-| **Claude Code**       | `claude --resume <id>`  |
-| **OpenCode**          | `opencode --session <id>` |
-| **oh-my-pi** (`omp`)  | `omp --resume <id>`     |
+| **Claude Code**             | `claude --resume <id>`    |
+| **OpenCode**                | `opencode --session <id>` |
+| **oh-my-pi** (`omp`)        | `omp --resume <id>`       |
+| **GitHub Copilot CLI**      | `copilot --resume=<id>`   |
+| **GitHub Copilot** (VS Code) | opens the workspace in VS Code † |
+
+> † VS Code chats are GUI-bound — there is no per-session CLI resume, so `convos`
+> opens the workspace folder and the conversation is reachable from the Chat
+> view's history.
 
 More tools (Codex, Gemini, Cursor, …) are designed to drop in — see *Adding a tool*.
 

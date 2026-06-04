@@ -1,6 +1,6 @@
 {
   "name": "convos",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Search & resume your AI coding conversations across every tool",
   "type": "module",
   "bin": {
