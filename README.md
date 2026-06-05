@@ -10,10 +10,10 @@ re-enter any of them with one keystroke.
 ```
 $ convos
 
-  convos ▸ cloudflare
+  convos ▸ databricks
  ┌─────────────────────────────────────────────────────────────────────┐
- │ today 14:32  claude   ~/dev/vibe-code     Connect GoDaddy to Cloudflare│
- │ Mon   18:40  claude   ~/dev/zaylas        DNS records for zaylas.store │
+ │ today 14:32  claude   ~/dev/vibe-code     Query databricks using CLI│
+ │ Mon   18:40  claude   ~/dev          Agent skill to query databricks│
  └─────────────────────────────────────────────────────────────────────┘
   enter: resume · ctrl-y: copy command · ctrl-/: toggle preview
 ```
