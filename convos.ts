@@ -118,8 +118,20 @@ function launch(s: Session): never {
   const src = sourceByName(s.tool)!;
   const { argv } = src.resume(s);
   console.error(C.dim(`↻ resuming in ${shortDir(s.dir)} …`));
-  const r = spawnSync(argv[0], argv.slice(1), { cwd: s.dir, stdio: "inherit" });
-  process.exit(r.status ?? 0);
+  const cwd = s.dir && s.dir !== "(unknown)" ? s.dir : process.cwd();
+  const r = spawnSync(argv[0], argv.slice(1), { cwd, stdio: "inherit" });
+  if (r.error) {
+    console.error(`Failed to run ${argv[0]}: ${r.error.message}`);
+    if (argv[0].endsWith("/cursor") || argv[0] === "cursor") {
+      console.error(
+        C.dim(
+          "Tip: install the shell command in Cursor → Command Palette → \"Shell Command: Install 'cursor' command in PATH\""
+        )
+      );
+    }
+    process.exit(1);
+  }
+  process.exit(r.status ?? (r.signal ? 128 : 0));
 }
 
 function copyCmd(s: Session): void {
@@ -198,6 +210,7 @@ const HELP = `convos — search & resume your AI coding conversations across too
 USAGE
   convos                 open the interactive picker (default)
   convos list            print a plain table (scriptable)
+  convos resume <id>     resume one session by id (for testing)
   convos --today         only today's conversations
   convos --dir <substr>  only conversations from matching directories
   convos --tool <name>   only one tool (e.g. claude)
@@ -227,4 +240,21 @@ if (flags.help || cmd === "help") {
 const sessions = applyFilters(buildIndex(), flags);
 
 if (cmd === "list") plainList(sessions);
-else pick(sessions);
+else if (cmd === "resume") {
+  const id = positional[0];
+  if (!id) {
+    console.error("Usage: convos resume <session-id>");
+    process.exit(1);
+  }
+  const s = findById(id);
+  if (!s) {
+    console.error("Session not found in index.");
+    process.exit(1);
+  }
+  if (flags["print-cmd"]) {
+    const { argv, shell } = sourceByName(s.tool)!.resume(s);
+    console.log(JSON.stringify({ argv, shell }, null, 2));
+    process.exit(0);
+  }
+  launch(s);
+} else pick(sessions);

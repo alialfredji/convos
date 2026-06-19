@@ -23,6 +23,7 @@ $ convos
 ```
 convos                 open the interactive picker (default)
 convos list            print a plain table (scriptable)
+convos resume <id>     resume one session by id (useful for testing)
 convos --today         only today's conversations
 convos --dir <substr>  only conversations from matching directories
 convos --tool <name>   only one tool (e.g. claude)
@@ -47,11 +48,11 @@ convos --help          full help
 | **oh-my-pi** (`omp`)        | `omp --resume <id>`       |
 | **GitHub Copilot CLI**      | `copilot --resume=<id>`   |
 | **GitHub Copilot** (VS Code) | opens the workspace in VS Code † |
-| **Cursor**                  | opens the workspace in Cursor † |
+| **Cursor**                  | `cursor agent --resume <id>` |
 
-> † VS Code and Cursor chats are GUI-bound — there is no per-session CLI resume,
-> so `convos` opens the workspace folder and the conversation is reachable from
-> the tool's chat history.
+> † VS Code chats are GUI-bound — there is no per-session CLI resume, so
+> `convos` opens the workspace folder and the conversation is reachable from the
+> tool's chat history.
 
 More tools (Codex, Gemini, …) are designed to drop in — see *Adding a tool*.
 
@@ -104,8 +105,71 @@ cd convos
 
 </details>
 
+## Working on the project
+
+Install dependencies:
+
+```sh
+npm install
+```
+
+Run from source without reinstalling the Homebrew tool:
+
+```sh
+npm run dev
+```
+
+List sessions for one provider:
+
+```sh
+npm run dev -- list --tool cursor
+```
+
+Print the exact resume command without launching it:
+
+```sh
+npm run dev -- resume <session-id> --print-cmd
+```
+
+Actually test that a session resumes:
+
+```sh
+npm run dev -- resume <session-id>
+```
+
+Run the test suite:
+
+```sh
+npm test
+```
+
 ## Adding a tool
 
 Create `sources/<tool>.ts` implementing `Source`, then register it in
-`sources/index.ts`. The picker, cache, search, and resume flow all work
-automatically once `parse()` returns normalized `Session` objects.
+`sources/index.ts`.
+
+Each source should:
+
+- Implement `available()` so missing tools/data do not break indexing.
+- Use `files()` + `parse()` for file-backed transcripts, or `scan()` for
+  database/bulk sources.
+- Return normalized `Session` objects with the provider `tool`, resumable `id`,
+  original `dir`, title, timestamps, message count, and backing `file`.
+- Implement `resume()` with the exact CLI command needed to reopen the session.
+- Add `transcript()` when the picker preview can show useful conversation turns.
+- Add or update tests for parsing, transcript preview, and resume command shape.
+
+Validation before pushing:
+
+```sh
+npm test
+npm run dev -- list --tool <tool>
+npm run dev -- resume <session-id> --print-cmd
+npm run dev -- resume <session-id>
+```
+
+For Cursor specifically, `--print-cmd` should show a command shaped like:
+
+```sh
+cursor agent --resume <session-id> --workspace <project-dir>
+```

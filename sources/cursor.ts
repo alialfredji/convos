@@ -1,5 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { basename, dirname, extname, join, sep } from "node:path";
 import type { ResumePlan, Session, Source, Turn } from "./types.ts";
 
@@ -251,10 +252,16 @@ export const cursor: Source = {
   },
 
   resume(s: Session): ResumePlan {
-    return {
-      argv: ["cursor", s.dir],
-      shell: `cursor ${shq(s.dir)}  # then reopen the chat from Cursor history (no per-session CLI resume)`,
-    };
+    const bin = resolveCursorBin() ?? "cursor";
+    const argv = [bin, "agent", "--resume", s.id];
+    if (s.dir && s.dir !== "(unknown)") argv.push("--workspace", s.dir);
+
+    const shell =
+      s.dir && s.dir !== "(unknown)"
+        ? `cd ${shq(s.dir)} && ${bin} agent --resume ${s.id}`
+        : `${bin} agent --resume ${s.id}`;
+
+    return { argv, shell };
   },
 
   transcript(s: Session): Turn[] {
@@ -264,4 +271,42 @@ export const cursor: Source = {
 
 function shq(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+let cachedCursorBin: string | null | undefined;
+
+/** Cursor's `cursor` CLI is often missing from PATH; resolve the real binary. */
+export function resolveCursorBin(): string | null {
+  if (cachedCursorBin !== undefined) return cachedCursorBin;
+
+  const which = spawnSync("sh", ["-c", "command -v cursor"], { encoding: "utf8" });
+  const fromPath = which.stdout.trim();
+  if (fromPath && which.status === 0) {
+    cachedCursorBin = fromPath;
+    return cachedCursorBin;
+  }
+
+  if (platform() === "darwin") {
+    const app = "/Applications/Cursor.app/Contents/Resources/app/bin/cursor";
+    if (existsSync(app)) {
+      cachedCursorBin = app;
+      return cachedCursorBin;
+    }
+  }
+
+  if (platform() === "linux") {
+    for (const candidate of [
+      join(homedir(), ".local/bin/cursor"),
+      "/usr/bin/cursor",
+      "/usr/local/bin/cursor",
+    ]) {
+      if (existsSync(candidate)) {
+        cachedCursorBin = candidate;
+        return cachedCursorBin;
+      }
+    }
+  }
+
+  cachedCursorBin = null;
+  return cachedCursorBin;
 }

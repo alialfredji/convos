@@ -94,6 +94,17 @@ describe("cursor source", () => {
       { role: "user", text: "Add Cursor support" },
       { role: "assistant", text: "Cursor support is ready." },
     ]);
-    expect(cursor.resume(session).argv).toEqual(["cursor", process.cwd()]);
+    const plan = cursor.resume(session);
+    expect(plan.argv.slice(1)).toEqual([
+      "agent",
+      "--resume",
+      session.id,
+      "--workspace",
+      process.cwd(),
+    ]);
+    expect(plan.argv[0]).toMatch(/cursor$/);
+    expect(plan.shell).toBe(
+      `cd '${process.cwd().replace(/'/g, `'\\''`)}' && ${plan.argv[0]} agent --resume ${session.id}`
+    );
   });
 });
