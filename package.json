@@ -1,10 +1,13 @@
 {
   "name": "convos",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Search & resume your AI coding conversations across every tool",
   "type": "module",
   "bin": {
     "convos": "./convos.ts"
+  },
+  "scripts": {
+    "test": "bun test"
   },
   "devDependencies": {
     "bun-types": "latest"

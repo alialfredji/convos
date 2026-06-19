@@ -47,12 +47,13 @@ convos --help          full help
 | **oh-my-pi** (`omp`)        | `omp --resume <id>`       |
 | **GitHub Copilot CLI**      | `copilot --resume=<id>`   |
 | **GitHub Copilot** (VS Code) | opens the workspace in VS Code † |
+| **Cursor**                  | opens the workspace in Cursor † |
 
-> † VS Code chats are GUI-bound — there is no per-session CLI resume, so `convos`
-> opens the workspace folder and the conversation is reachable from the Chat
-> view's history.
+> † VS Code and Cursor chats are GUI-bound — there is no per-session CLI resume,
+> so `convos` opens the workspace folder and the conversation is reachable from
+> the tool's chat history.
 
-More tools (Codex, Gemini, Cursor, …) are designed to drop in — see *Adding a tool*.
+More tools (Codex, Gemini, …) are designed to drop in — see *Adding a tool*.
 
 ## How it works
 

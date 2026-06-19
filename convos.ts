@@ -209,7 +209,7 @@ PICKER KEYS
   ctrl-y         copy the resume command to the clipboard (don't launch)
   ctrl-/         toggle the transcript preview
 
-Indexes: Claude Code, OpenCode, oh-my-pi (omp), and GitHub Copilot (CLI + VS Code).
+Indexes: Claude Code, OpenCode, oh-my-pi (omp), GitHub Copilot (CLI + VS Code), and Cursor.
 More tools are pluggable in convos/sources/.`;
 
 // ── main ───────────────────────────────────────────────────────────────────--
