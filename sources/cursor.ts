@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { basename, dirname, extname, join, sep } from "node:path";
-import type { ResumePlan, Session, Source, Turn } from "./types.ts";
+import type { ResumePlan, Session, Source, ToolCall, Turn } from "./types.ts";
 
 const ROOT = join(homedir(), ".cursor");
 const PROJECTS = join(ROOT, "projects");
@@ -142,6 +142,17 @@ function metaFor(file: string, id: string): JsonRecord | null {
   return null;
 }
 
+function stripRedacted(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === "[REDACTED]") return "";
+  return text.replace(/\n*\[REDACTED\]\s*$/g, "").trim();
+}
+
+function blocksFromMessage(message: unknown): JsonRecord[] {
+  if (!isRecord(message) || !Array.isArray(message.content)) return [];
+  return message.content.filter(isRecord);
+}
+
 function transcriptTurns(file: string): Turn[] {
   let raw: string;
   try {
@@ -155,16 +166,34 @@ function transcriptTurns(file: string): Turn[] {
     if (!line) continue;
     const parsed = readLine(line);
     if (!parsed) continue;
-    const role = parsed?.role;
+    const role = parsed.role;
     if (role !== "user" && role !== "assistant") continue;
 
-    const rawText = textOf(parsed.message);
-    const text = clean(role === "user" ? userText(rawText) : rawText);
-    if (!text || isMeta(text)) continue;
-    turns.push({ role, text });
+    const tools: ToolCall[] = [];
+    let text = "";
+
+    for (const block of blocksFromMessage(parsed.message)) {
+      if (block.type === "tool_use" && typeof block.name === "string") {
+        tools.push({ name: block.name, input: block.input ?? {} });
+        continue;
+      }
+      if (block.type === "tool_result") continue;
+      if (block.type !== "text") continue;
+
+      const chunk = clean(role === "user" ? userText(textOf(block)) : textOf(block));
+      const visible = stripRedacted(chunk);
+      if (!visible || isMeta(visible)) continue;
+      text = text ? `${text}\n\n${visible}` : visible;
+    }
+
+    if (!text && tools.length === 0) continue;
+    const turn: Turn = { role, text };
+    if (tools.length > 0) turn.tools = tools;
+    turns.push(turn);
   }
   return turns;
 }
+
 
 function readLine(line: string): JsonRecord | null {
   try {

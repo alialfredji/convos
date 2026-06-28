@@ -2,8 +2,16 @@
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { buildIndex, findById } from "./cache.ts";
+import {
+  compactCatalogEntry,
+  exportCompactJson,
+  parseCompactOptions,
+  sessionDigest,
+} from "./compact.ts";
+import { formatTurnLines, sessionExport, sessionSummary } from "./export.ts";
 import { sourceByName } from "./sources/index.ts";
 import type { Session } from "./sources/types.ts";
+import { parseTimeArg } from "./time.ts";
 
 const HOME = homedir();
 const C = {
@@ -43,12 +51,27 @@ function applyFilters(sessions: Session[], args: Record<string, string | boolean
     start.setHours(0, 0, 0, 0);
     out = out.filter((s) => s.end >= start.getTime());
   }
+  if (args.week) {
+    out = out.filter((s) => s.end >= Date.now() - 7 * 86_400_000);
+  }
+  if (typeof args.since === "string") {
+    const since = parseTimeArg(args.since);
+    out = out.filter((s) => s.end >= since);
+  }
+  if (typeof args.until === "string") {
+    const until = parseTimeArg(args.until);
+    out = out.filter((s) => s.start <= until);
+  }
   if (typeof args.dir === "string") {
     const needle = args.dir.toLowerCase();
     out = out.filter((s) => s.dir.toLowerCase().includes(needle));
   }
   if (typeof args.tool === "string") {
     out = out.filter((s) => s.tool === args.tool);
+  }
+  if (typeof args.limit === "string") {
+    const limit = Number(args.limit);
+    if (Number.isFinite(limit) && limit > 0) out = out.slice(0, limit);
   }
   return out;
 }
@@ -62,16 +85,116 @@ function row(s: Session): string {
   return `${s.id}\t${display}`;
 }
 
-function plainList(sessions: Session[]): void {
+function outputFormat(flags: Record<string, string | boolean>): string {
+  if (typeof flags.format === "string") return flags.format;
+  if (flags.compact && flags.transcript) return "digest";
+  if (flags.compact) return "compact";
+  return "json";
+}
+
+function plainList(sessions: Session[], flags: Record<string, string | boolean>): void {
   if (sessions.length === 0) {
     console.log("No conversations match.");
     return;
   }
+  const compact = parseCompactOptions(flags);
+  if (flags.compact) {
+    console.log(JSON.stringify(sessions.map((s) => compactCatalogEntry(s, compact))));
+    return;
+  }
+  if (flags.json) {
+    console.log(JSON.stringify({ count: sessions.length, sessions: sessions.map(sessionSummary) }, null, 2));
+    return;
+  }
   for (const s of sessions) {
+    const idCol = flags.ids ? `${C.dim(s.id)}  ` : "";
     console.log(
-      `${pad(relDate(s.end), 11)}  ${pad(s.tool, 8)}  ${pad(shortDir(s.dir), 34)}  ${s.title}`
+      `${idCol}${pad(relDate(s.end), 11)}  ${pad(s.tool, 8)}  ${pad(shortDir(s.dir), 34)}  ${s.title}`
     );
   }
+}
+
+function showSession(s: Session, flags: Record<string, string | boolean>): void {
+  const withTranscript = Boolean(flags.transcript);
+  const compact = parseCompactOptions(flags);
+  const format = outputFormat(flags);
+
+  if (format === "digest") {
+    console.log(sessionDigest(s, compact));
+    return;
+  }
+  if (format === "compact" || (flags.compact && flags.json)) {
+    if (withTranscript) {
+      console.log(exportCompactJson([s], compact, true));
+    } else {
+      console.log(JSON.stringify(compactCatalogEntry(s, compact)));
+    }
+    return;
+  }
+  if (flags.json) {
+    console.log(JSON.stringify(sessionExport(s, { transcript: withTranscript }), null, 2));
+    return;
+  }
+
+  console.log(C.bold(s.title));
+  console.log(`${C.dim("id")}       ${s.id}`);
+  console.log(`${C.dim("tool")}     ${s.tool}`);
+  console.log(`${C.dim("dir")}      ${s.dir}`);
+  console.log(`${C.dim("file")}     ${s.file}`);
+  console.log(
+    `${C.dim("when")}     ${new Date(s.start).toLocaleString()} → ${new Date(s.end).toLocaleString()}`
+  );
+  console.log(`${C.dim("msgs")}     ${s.msgCount}`);
+  if (s.firstPrompt) console.log(`${C.dim("prompt")}   ${s.firstPrompt}`);
+
+  const src = sourceByName(s.tool);
+  const { shell } = src ? src.resume(s) : { shell: "" };
+  if (shell) console.log(`${C.dim("resume")}   ${shell}`);
+
+  if (!withTranscript) {
+    console.log(C.dim("\nAdd --transcript for the full conversation (or --json --transcript for agents)."));
+    return;
+  }
+
+  const turns = src?.transcript?.(s) ?? [];
+  console.log(C.dim("─".repeat(50)));
+  for (const t of turns) {
+    const tag = t.role === "user" ? C.cyan("▸ you") : C.yellow("◂ ai ");
+    console.log(`${tag}\n${formatTurnLines(t).join("\n")}\n`);
+  }
+}
+
+function exportSessions(sessions: Session[], flags: Record<string, string | boolean>): void {
+  const withTranscript = Boolean(flags.transcript);
+  const compact = parseCompactOptions(flags);
+  const format = outputFormat(flags);
+
+  if (format === "digest") {
+    const blocks = sessions.map((s) => sessionDigest(s, compact));
+    console.log(blocks.join("\n\n---\n\n"));
+    return;
+  }
+  if (format === "compact") {
+    console.log(exportCompactJson(sessions, compact, withTranscript));
+    return;
+  }
+  if (format === "jsonl") {
+    for (const s of sessions) {
+      console.log(JSON.stringify(sessionExport(s, { transcript: withTranscript })));
+    }
+    return;
+  }
+  if (format !== "json") {
+    console.error(`Unknown format "${format}" — use json, jsonl, compact, or digest.`);
+    process.exit(1);
+  }
+  console.log(
+    JSON.stringify(
+      { count: sessions.length, sessions: sessions.map((s) => sessionExport(s, { transcript: withTranscript })) },
+      null,
+      2
+    )
+  );
 }
 
 // ── preview (invoked by fzf per highlighted row) ─────────────────────────────-
@@ -96,10 +219,11 @@ function preview(id: string): void {
   const src = sourceByName(s.tool);
   const raw = src?.transcript?.(s) ?? [];
   const turns = raw
-    .filter((t) => t.text)
+    .filter((t) => t.text || (t.tools?.length ?? 0) > 0)
     .map((t) => {
       const tag = t.role === "user" ? C.cyan("▸ you") : C.yellow("◂ ai ");
-      return `${tag}  ${t.text.slice(0, 280)}`;
+      const body = formatTurnLines(t, { truncate: 280 }).join("\n   ");
+      return `${tag}  ${body}`;
     });
   // Fall back to the first prompt when a source has no transcript reader.
   if (turns.length === 0 && s.firstPrompt) {
@@ -208,13 +332,54 @@ function parseArgs(argv: string[]): { cmd: string; positional: string[]; flags: 
 const HELP = `convos — search & resume your AI coding conversations across tools
 
 USAGE
-  convos                 open the interactive picker (default)
-  convos list            print a plain table (scriptable)
-  convos resume <id>     resume one session by id (for testing)
-  convos --today         only today's conversations
-  convos --dir <substr>  only conversations from matching directories
-  convos --tool <name>   only one tool (e.g. claude)
-  convos --help          this help
+  convos                      open the interactive picker (default)
+  convos list                 print a plain table (scriptable)
+  convos show <id>            print one session (metadata, optional transcript)
+  convos export               dump many sessions as JSON (for agent review)
+  convos resume <id>          resume one session by id (for testing)
+
+FILTERS  (list, export, and the picker)
+  --today                     only today's conversations
+  --week                      conversations from the last 7 days
+  --since <time>              e.g. 7d, 24h, 30m, or 2026-06-21
+  --until <time>              upper bound (same formats as --since)
+  --dir <substr>              only conversations from matching directories
+  --tool <name>               only one tool (e.g. claude, cursor)
+  --limit <n>                 cap results (most recent first)
+
+OUTPUT  (for scripts and AI agents)
+  convos list --json          session catalog with ids and timestamps
+  convos list --compact       minimal catalog JSON (low context)
+  convos list --ids           include session id in the plain table
+  convos show <id> --json     one session as JSON
+  convos show <id> --transcript
+                              include full conversation turns
+  convos export --week --json --transcript
+                              batch export for retrospective review
+
+LOW-CONTEXT  (prefer these for agent review)
+  convos list --week --compact
+                              tiny catalog: id, tool, dir, title, msgs, prompt
+  convos show <id> --format digest --transcript
+                              markdown timeline (~5-10x smaller than JSON)
+  convos export --week --format digest --transcript
+                              batch markdown digests
+  convos export --week --format compact --transcript
+                              compact JSON with collapsed tool turns
+  --tools-only                skip assistant prose; keep user + tool calls
+  --max-chars 200             truncate text per turn (default 280 with --compact)
+  --collapse-tools            merge consecutive tool-only turns (on with --compact)
+
+AGENT WORKFLOW  (low context)
+  1. convos list --week --compact
+  2. convos show <id> --format digest --transcript
+  3. convos show <id> --json --transcript   only if you need full detail
+  — batch: convos export --week --format digest --transcript
+
+AGENT WORKFLOW  (full detail)
+  1. convos list --week --json
+  2. convos show <id> --json --transcript
+  — or one shot: convos export --week --json --transcript
 
 PICKER KEYS
   type           fuzzy-search title / directory / tool / date
@@ -239,8 +404,22 @@ if (flags.help || cmd === "help") {
 
 const sessions = applyFilters(buildIndex(), flags);
 
-if (cmd === "list") plainList(sessions);
-else if (cmd === "resume") {
+if (cmd === "list") plainList(sessions, flags);
+else if (cmd === "show") {
+  const id = positional[0];
+  if (!id) {
+    console.error("Usage: convos show <session-id> [--json] [--transcript]");
+    process.exit(1);
+  }
+  const s = findById(id);
+  if (!s) {
+    console.error("Session not found in index.");
+    process.exit(1);
+  }
+  showSession(s, flags);
+} else if (cmd === "export") {
+  exportSessions(sessions, flags);
+} else if (cmd === "resume") {
   const id = positional[0];
   if (!id) {
     console.error("Usage: convos resume <session-id>");

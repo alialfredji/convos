@@ -12,9 +12,15 @@ export interface Session {
 }
 
 // One conversation turn, used to render the picker preview.
+export interface ToolCall {
+  name: string;
+  input: unknown;
+}
+
 export interface Turn {
   role: "user" | "assistant";
   text: string;
+  tools?: ToolCall[];
 }
 
 // How to re-enter a session for a given tool.

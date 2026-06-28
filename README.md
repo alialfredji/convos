@@ -23,12 +23,58 @@ $ convos
 ```
 convos                 open the interactive picker (default)
 convos list            print a plain table (scriptable)
+convos show <id>       print one session (metadata + optional transcript)
+convos export          dump many sessions as JSON (for agent review)
 convos resume <id>     resume one session by id (useful for testing)
 convos --today         only today's conversations
+convos --week          conversations from the last 7 days
+convos --since <time>  e.g. 7d, 24h, or 2026-06-21
 convos --dir <substr>  only conversations from matching directories
 convos --tool <name>   only one tool (e.g. claude)
 convos --help          full help
 ```
+
+### Review past sessions with an AI agent
+
+`convos` collects session data; your agent does the analysis. **Prefer low-context formats** to save tokens:
+
+```sh
+# 1. Tiny catalog (~10x smaller than --json)
+convos list --week --compact
+
+# 2. Markdown digest per session (~5-10x smaller than full JSON)
+convos show <session-id> --format digest --transcript
+
+# 3. Batch weekly review
+convos export --week --format digest --transcript
+
+# Cursor with lots of [REDACTED]: tools-only timeline
+convos export --week --format digest --transcript --tools-only
+```
+
+Full JSON when you need every field:
+
+```sh
+convos show <session-id> --json --transcript
+convos export --week --format jsonl --transcript
+```
+
+Point your agent at the JSON output and ask it to review what you worked on, what went well, what failed, and what to improve. `convos` stays focused on discovery and export — not interpretation.
+
+Install the agent skill (teaches any coding agent this workflow):
+
+```sh
+npx skills add alialfredji/convos@convos -g -y
+```
+
+### Cursor transcripts and `[REDACTED]`
+
+Cursor redacts internal reasoning when persisting agent transcripts. You may see `[REDACTED]` in assistant text on disk — that is Cursor's storage format, not convos hiding content.
+
+`convos` improves on raw files by:
+
+- Stripping `[REDACTED]` markers from visible text
+- Exporting `tool_use` blocks under each turn's `tools` array (commands, file reads, patches) — often the best signal when thinking is redacted
 
 ### Picker keys
 
