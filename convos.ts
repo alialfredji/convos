@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
+import pkg from "./package.json";
 import { buildIndex, findById } from "./cache.ts";
 import {
   compactCatalogEntry,
@@ -11,9 +13,21 @@ import {
 import { formatTurnLines, sessionExport, sessionSummary } from "./export.ts";
 import { sourceByName } from "./sources/index.ts";
 import type { Session } from "./sources/types.ts";
+// Type-only import: erased at runtime, so a missing ./search.ts never breaks
+// list/_rows. The actual implementation is loaded lazily via `await import` in
+// the _search handler (see below), which is the only path that needs it.
+import type { SearchHit } from "./search.ts";
 import { parseTimeArg } from "./time.ts";
 
 const HOME = homedir();
+
+// How to re-invoke ourselves for fzf's --preview and the _search/_rows reloads.
+// Installed → "convos" is on PATH. From source (`bun convos.ts`) → run this same
+// file through bun so preview/reload subcommands resolve correctly.
+const SELF =
+  process.argv[1] && process.argv[1].endsWith("convos.ts")
+    ? `bun ${resolve(process.argv[1])}`
+    : "convos";
 const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
@@ -77,12 +91,64 @@ function applyFilters(sessions: Session[], args: Record<string, string | boolean
 }
 
 // ── rendering ──────────────────────────────────────────────────────────────--
-// Tab-delimited: <id>\t<display>. fzf shows + searches only the display field.
-function row(s: Session): string {
-  const display = `${C.dim(pad(relDate(s.end), 11))}  ${C.cyan(pad(s.tool, 8))}  ${C.green(
+function collapseWs(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
+}
+
+// Shared metadata prefix (date · tool · dir · title) — the clean visible columns.
+// Reused by row() and searchRow() so metadata renders identically everywhere.
+function metaPrefix(s: Session): string {
+  return `${C.dim(pad(relDate(s.end), 11))}  ${C.cyan(pad(s.tool, 8))}  ${C.green(
     pad(shortDir(s.dir), 34)
   )}  ${C.bold(s.title)}`;
+}
+
+// A short, whitespace-collapsed first-prompt snippet — appended dim so fzf can
+// match on it without cluttering the layout. Skipped when it just echoes the
+// title (one is a prefix of the other) to avoid duplicate noise.
+function promptSnippet(s: Session): string {
+  const p = collapseWs(s.firstPrompt);
+  if (!p) return "";
+  const title = collapseWs(s.title).toLowerCase();
+  const pl = p.toLowerCase();
+  if (title && (title.startsWith(pl) || pl.startsWith(title))) return "";
+  return truncate(p, 64);
+}
+
+// Compact, very dim date token so month/weekday queries match, e.g.
+// "2026-06 jun mon". Placed last so it never disturbs the visible columns.
+function dateToken(ms: number): string {
+  const d = new Date(ms);
+  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const mon = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"][
+    d.getMonth()
+  ];
+  const wd = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][d.getDay()];
+  return `${ym} ${mon} ${wd}`;
+}
+
+// Tab-delimited: <id>\t<display>. fzf shows + searches only the display field.
+// display = clean columns + (dim) prompt snippet + (dim) date token, so typing
+// fuzzy-matches title/dir/tool/date *and* the first prompt and month/weekday.
+function row(s: Session): string {
+  let display = metaPrefix(s);
+  const snip = promptSnippet(s);
+  if (snip) display += C.dim(`  ·  ${snip}`);
+  display += C.dim(`  ${dateToken(s.end)}`);
   return `${s.id}\t${display}`;
+}
+
+// Row for content-search results: same metadata prefix + the dim in-conversation
+// snippet returned by the FTS index.
+function searchRow(hit: SearchHit): string {
+  let display = metaPrefix(hit.session);
+  const snip = collapseWs(hit.snippet);
+  if (snip) display += C.dim(`  ·  ${snip}`);
+  return `${hit.session.id}\t${display}`;
 }
 
 function outputFormat(flags: Record<string, string | boolean>): string {
@@ -268,27 +334,74 @@ function copyCmd(s: Session): void {
 }
 
 // ── picker ─────────────────────────────────────────────────────────────────--
-function pick(sessions: Session[]): void {
+// Single-quote a value for safe embedding in an fzf reload/become command line.
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+// Reconstruct the currently-active filter scope as CLI flags, so the picker's
+// _search / _rows reloads stay within the same slice of sessions. today/week are
+// folded into --since since searchSessions() only understands since/until.
+function activeFilterArgs(flags: Record<string, string | boolean>): string[] {
+  const out: string[] = [];
+  if (typeof flags.tool === "string") out.push("--tool", flags.tool);
+  if (typeof flags.dir === "string") out.push("--dir", flags.dir);
+  let since = typeof flags.since === "string" ? flags.since : undefined;
+  if (!since && flags.today) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    since = new Date(d.getTime()).toISOString();
+  }
+  if (!since && flags.week) since = "7d";
+  if (since) out.push("--since", since);
+  if (typeof flags.until === "string") out.push("--until", flags.until);
+  if (typeof flags.limit === "string") out.push("--limit", flags.limit);
+  return out;
+}
+
+function pick(sessions: Session[], flags: Record<string, string | boolean>): void {
   if (sessions.length === 0) {
     console.error("No conversations found.");
     process.exit(0);
   }
   const input = sessions.map(row).join("\n");
+
+  // Filter flags shared by both reload commands, shell-quoted.
+  const filters = activeFilterArgs(flags).map(shq).join(" ");
+  const tail = filters ? ` ${filters}` : "";
+  // {q} is expanded (and escaped) by fzf into the current query. Entering content
+  // mode refreshes the index once (searchReloadInit); per-keystroke reloads pass
+  // --no-refresh so typing is query-only (~0.05s) instead of re-scanning files.
+  const searchReloadInit = `${SELF} _search {q}${tail}`;
+  const searchReloadType = `${SELF} _search {q} --no-refresh${tail}`;
+  const rowsReload = `${SELF} _rows${tail}`;
+
   const r = spawnSync(
     "fzf",
     [
       "--ansi",
       "--delimiter=\t",
       "--with-nth=2",
-      "--no-sort",
+      // No --no-sort: with an empty query fzf keeps input (recency) order, but
+      // once you type it ranks by match quality so the best hit floats to the
+      // top. Content mode disables search, so its bm25 order is preserved anyway.
       "--height=90%",
       "--layout=reverse",
       "--border",
       "--prompt=convos ▸ ",
-      "--header=enter: resume  ·  ctrl-y: copy command  ·  ctrl-/: toggle preview",
-      "--preview=convos _preview {1}",
+      "--header=enter: resume  ·  ctrl-y: copy  ·  ctrl-f: search inside  ·  ctrl-/: preview",
+      `--preview=${SELF} _preview {1}`,
       "--preview-window=down:55%:wrap",
       "--bind=ctrl-/:toggle-preview",
+      // The `change` handler drives content mode; define it, then disable it at
+      // startup so the default experience stays native fzf fuzzy over the rows.
+      `--bind=change:reload(${searchReloadType})`,
+      "--bind=start:unbind(change)",
+      // ctrl-f → content mode: stop native filtering, re-query per keystroke, and
+      // kick off an initial content search (this one refreshes the index).
+      `--bind=ctrl-f:disable-search+change-prompt(convos 🔎 ▸ )+rebind(change)+reload(${searchReloadInit})`,
+      // ctrl-g → back to metadata mode: restore native fuzzy over the rows.
+      `--bind=ctrl-g:enable-search+change-prompt(convos ▸ )+unbind(change)+reload(${rowsReload})`,
       "--expect=ctrl-y,enter",
     ],
     { input, stdio: ["pipe", "pipe", "inherit"], encoding: "utf8" }
@@ -337,6 +450,7 @@ USAGE
   convos show <id>            print one session (metadata, optional transcript)
   convos export               dump many sessions as JSON (for agent review)
   convos resume <id>          resume one session by id (for testing)
+  convos --version            print the installed convos version
 
 FILTERS  (list, export, and the picker)
   --today                     only today's conversations
@@ -382,7 +496,9 @@ AGENT WORKFLOW  (full detail)
   — or one shot: convos export --week --json --transcript
 
 PICKER KEYS
-  type           fuzzy-search title / directory / tool / date
+  type           fuzzy-search title / directory / tool / date / first prompt / month
+  ctrl-f         search INSIDE conversations (full-text over the transcript)
+  ctrl-g         return to metadata search
   enter          cd into the directory and resume the conversation
   ctrl-y         copy the resume command to the clipboard (don't launch)
   ctrl-/         toggle the transcript preview
@@ -402,7 +518,40 @@ if (flags.help || cmd === "help") {
   process.exit(0);
 }
 
+if (flags.version || cmd === "version") {
+  console.log(`convos ${pkg.version}`);
+  process.exit(0);
+}
+
+// Hidden: full-text search inside conversations (the picker's content mode).
+// Lazily imports ./search.ts so that a missing search module never breaks the
+// metadata commands (list/_rows/pick) — only this path requires it.
+if (cmd === "_search") {
+  const query = positional.join(" ").trim();
+  const { refreshSearchIndex, searchSessions } = await import("./search.ts");
+  const opts: { tool?: string; dir?: string; since?: number; until?: number; limit?: number } = {};
+  if (typeof flags.tool === "string") opts.tool = flags.tool;
+  if (typeof flags.dir === "string") opts.dir = flags.dir;
+  if (typeof flags.since === "string") opts.since = parseTimeArg(flags.since);
+  if (typeof flags.until === "string") opts.until = parseTimeArg(flags.until);
+  if (typeof flags.limit === "string") {
+    const n = Number(flags.limit);
+    if (Number.isFinite(n) && n > 0) opts.limit = n;
+  }
+  // Refresh on entry / direct use; the picker's per-keystroke reload passes
+  // --no-refresh to stay fast. An empty query returns recent conversations.
+  if (!flags["no-refresh"]) refreshSearchIndex();
+  for (const hit of searchSessions(query, opts)) console.log(searchRow(hit));
+  process.exit(0);
+}
+
 const sessions = applyFilters(buildIndex(), flags);
+
+// Hidden: emit the Phase-1 metadata rows for the picker to reload on ctrl-g.
+if (cmd === "_rows") {
+  for (const s of sessions) console.log(row(s));
+  process.exit(0);
+}
 
 if (cmd === "list") plainList(sessions, flags);
 else if (cmd === "show") {
@@ -436,4 +585,4 @@ else if (cmd === "show") {
     process.exit(0);
   }
   launch(s);
-} else pick(sessions);
+} else pick(sessions, flags);

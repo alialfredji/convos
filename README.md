@@ -15,7 +15,7 @@ $ convos
  │ today 14:32  claude   ~/dev/vibe-code     Query databricks using CLI│
  │ Mon   18:40  claude   ~/dev          Agent skill to query databricks│
  └─────────────────────────────────────────────────────────────────────┘
-  enter: resume · ctrl-y: copy command · ctrl-/: toggle preview
+  enter: resume · ctrl-y: copy · ctrl-f: search inside · ctrl-/: preview
 ```
 
 ## Usage
@@ -78,12 +78,27 @@ Cursor redacts internal reasoning when persisting agent transcripts. You may see
 
 ### Picker keys
 
-| key      | action                                                       |
-|----------|--------------------------------------------------------------|
-| *type*   | fuzzy-search across title / directory / tool / date          |
-| `enter`  | `cd` into the directory and resume the conversation          |
-| `ctrl-y` | copy the resume command to the clipboard (don't launch)      |
-| `ctrl-/` | toggle the transcript preview                                |
+| key      | action                                                            |
+|----------|-------------------------------------------------------------------|
+| *type*   | fuzzy-search title / directory / tool / date / **first prompt** / month |
+| `ctrl-f` | **search inside** conversations — full-text over every transcript |
+| `ctrl-g` | return to metadata search                                         |
+| `enter`  | `cd` into the directory and resume the conversation               |
+| `ctrl-y` | copy the resume command to the clipboard (don't launch)           |
+| `ctrl-/` | toggle the transcript preview                                     |
+
+### Two ways to search
+
+The picker opens in **metadata mode**: typing fuzzy-matches each conversation's
+title, directory, tool, date, *and* its first prompt (so a phrase you remember
+typing finds the session). When you type, results are ranked by match quality;
+an empty query keeps recent-first order.
+
+Press `ctrl-f` for **content mode**: every keystroke runs a full-text search
+*inside* the transcripts (messages **and** tool calls), ranked by relevance,
+with a matching snippet shown on each row. It's backed by a SQLite FTS5 index so
+it stays sub-second even over hundreds of conversations. Press `ctrl-g` to go
+back. Any active filter (`--tool`, `--dir`, `--since`, …) narrows both modes.
 
 ## Supported tools
 
@@ -110,6 +125,10 @@ More tools (Codex, Gemini, …) are designed to drop in — see *Adding a tool*.
 - **Index cache** (`~/.cache/convos/index.json`) is keyed on each session's
   mtime + size, so only changed sessions are re-parsed — the picker stays fast
   even with hundreds of conversations.
+- **Content index** (`~/.cache/convos/search.db`) is a SQLite FTS5 full-text
+  index over conversation turns, built lazily the first time you press `ctrl-f`
+  and refreshed incrementally (same mtime/size check) — so searching *inside*
+  conversations stays sub-second.
 - **Resume** runs the tool's own resume command in the session's original
   working directory.
 
