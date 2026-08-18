@@ -10,6 +10,7 @@ const CACHE_FILE = join(CACHE_DIR, "index.json");
 interface Entry {
   mtimeMs: number;
   size: number;
+  sourceKey?: string;
   session: Session;
 }
 type Cache = Record<string, Entry>; // keyed by transcript file path
@@ -46,6 +47,7 @@ export function buildIndex(): Session[] {
     }
 
     // FILE-BASED source: cache by mtime/size, only re-parse changed files.
+    const sourceKey = source.cacheKey?.();
     for (const file of source.files!()) {
       let st;
       try {
@@ -54,13 +56,18 @@ export function buildIndex(): Session[] {
         continue; // file vanished mid-scan
       }
       const prev = cache[file];
-      if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) {
+      if (
+        prev &&
+        prev.mtimeMs === st.mtimeMs &&
+        prev.size === st.size &&
+        prev.sourceKey === sourceKey
+      ) {
         next[file] = prev; // unchanged → reuse
         continue;
       }
       const session = source.parse!(file);
       if (!session) continue;
-      next[file] = { mtimeMs: st.mtimeMs, size: st.size, session };
+      next[file] = { mtimeMs: st.mtimeMs, size: st.size, sourceKey, session };
       reparsed++;
     }
   }
