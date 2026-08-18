@@ -43,6 +43,9 @@ export interface Source {
   available(): boolean;
   // FILE-BASED: discover transcript files; paths are passed back to parse().
   files?(): string[];
+  // Optional source-wide cache fingerprint. Use when parsing also depends on a
+  // sidecar file so cached sessions refresh when that sidecar changes.
+  cacheKey?(): string;
   // FILE-BASED: parse one transcript file into a Session (or null to skip).
   parse?(file: string): Session | null;
   // BULK/DB-BASED: return every session directly (no per-file caching).

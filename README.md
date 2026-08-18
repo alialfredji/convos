@@ -110,12 +110,17 @@ back. Any active filter (`--tool`, `--dir`, `--since`, …) narrows both modes.
 | **GitHub Copilot CLI**      | `copilot --resume=<id>`   |
 | **GitHub Copilot** (VS Code) | opens the workspace in VS Code † |
 | **Cursor**                  | `cursor agent --resume <id>` |
+| **Codex** (CLI + Desktop)   | `codex resume <id>`       |
 
 > † VS Code chats are GUI-bound — there is no per-session CLI resume, so
 > `convos` opens the workspace folder and the conversation is reachable from the
 > tool's chat history.
 
-More tools (Codex, Gemini, …) are designed to drop in — see *Adding a tool*.
+Codex CLI and Desktop share the same `~/.codex` rollout store. `convos` indexes
+their interactive sessions, including archived transcripts, while omitting
+non-interactive exec runs and subagent rollouts.
+
+More tools (Gemini, …) are designed to drop in — see *Adding a tool*.
 
 ## How it works
 
